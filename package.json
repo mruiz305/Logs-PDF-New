@@ -1,0 +1,17 @@
+{
+  "name": "logs-pdf-generator",
+  "version": "1.1.0",
+  "main": "generateLogsPdf.js",
+  "license": "MIT",
+  "scripts": {
+    "one": "node generateLogsPdf.js --from 2024-08-01 --to 2025-10-12 --submitter \"Oreana Tascione\"",
+    "all": "node generateLogsPdf.js --from 2024-08-01 --to 2025-10-12 --all"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "googleapis": "^131.0.0",
+    "mysql2": "^3.9.7",
+    "node-cron": "^4.2.1",
+    "puppeteer": "^23.7.0"
+  }
+}
