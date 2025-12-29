@@ -746,6 +746,9 @@ function buildHtml(submitterName, rows, from, to) {
 async function generatePdf(browser, html, outputPath) {
   const page = await browser.newPage();
   try {
+    page.setDefaultTimeout(0);
+    page.setDefaultNavigationTimeout(0);
+
     await page.setContent(html, { waitUntil: 'load' });
     await page.emulateMediaType('print');
     await page.pdf({
