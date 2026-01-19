@@ -5,6 +5,12 @@ const mysql = require('mysql2/promise');
 const puppeteer = require('puppeteer');
 const { google } = require('googleapis');
 const { sendViaGmail } = require('./gmailSender');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileP = promisify(execFile);
+
+// Si qpdf está instalado por Chocolatey, queda en el PATH → basta "qpdf"
+const QPDF_PATH = process.env.QPDF_PATH || 'qpdf';
 
 /* ============= CLI ============= */
 function argValue(name, def = '') {
@@ -32,6 +38,19 @@ async function getMysqlConnection() {
     charset: 'utf8mb4',
     dateStrings: true,
   });
+}
+
+async function fetchEligibleRepsFromUsers(conn) {
+  const [rows] = await conn.execute(`
+    SELECT TRIM(COALESCE(NULLIF(name,''), email)) AS submitter
+    FROM stg_g_users
+    WHERE systemDepartment = 'Marketing'
+      AND UPPER(hrStatus) = 'ACTIVE'
+      AND \`rank\` IS NOT NULL
+      AND TRIM(COALESCE(NULLIF(name,''), email)) <> ''
+    ORDER BY submitter
+  `);
+  return rows.map(r => r.submitter);
 }
 
 /* ============= Registro de usuarios sin URL ============= */
@@ -498,11 +517,12 @@ function buildMonthlySummaryTable(monthAgg) {
 }
 
 /* ============= HTML (solo en memoria para PDF) ============= */
-function buildHtml(submitterName, rows, from, to) {
+function buildHtml(submitterName, rows, from, to,tableHtmlOverride = null) {
   const kpis = computeKpis(rows);
   const monthAgg = computeMonthlyAggregates(rows);
   const reportDate = new Date().toLocaleDateString('en-US');
-  const tableHtml = buildGroupedTable(rows);
+  //const tableHtml = buildGroupedTable(rows);
+  const tableHtml = tableHtmlOverride ?? buildGroupedTable(rows);
 
   return `
 <!doctype html>
@@ -847,15 +867,33 @@ async function uploadToDrive(filePath, fileName) {
   return fileRes.data;
 }
 
+async function linearizePdf(pdfPath) {
+  const tmp = pdfPath.replace(/\.pdf$/i, '.linear.pdf');
+
+  await execFileP(QPDF_PATH, [
+    '--linearize',
+    pdfPath,
+    tmp
+  ]);
+
+  fs.renameSync(tmp, pdfPath);
+}
+
 /* ============= Orquestación ============= */
 async function generateForOne(conn, browser, submitterName, from, to) {
   const rows = await fetchLogsForSubmitter(conn, submitterName, from, to);
   if (!rows.length) {
     console.log(`(sin datos) ${submitterName}  [${from}..${to}]`);
-    return null;
-  }
+  } 
 
-  const html = buildHtml(submitterName, rows, from, to);
+    const hasRows = rows && rows.length > 0;
+    const tableHtml = hasRows
+  ? buildGroupedTable(rows)
+  : `<div style="padding:10px; border:1px solid #000; font-size:10px;">
+       No cases found for this rep in the selected date range.
+     </div>`;
+
+  const html = buildHtml(submitterName, rows, from, to,tableHtml);
 
   const outDir = process.env.OUTPUT_DIR || path.join(__dirname, 'output');
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
@@ -865,7 +903,10 @@ async function generateForOne(conn, browser, submitterName, from, to) {
 
   await generatePdf(browser, html, pdfPath);
   console.log(`✔ PDF: ${pdfPath}`);
-
+  
+    // ✅ Optimiza para Drive/iPhone
+    await linearizePdf(pdfPath);
+  console.log('✔ PDF linearizado (mejor preview en Drive/iPhone)');
   // Subida opcional a Drive (por defecto NO sube)
   const shouldUpload = (process.env.UPLOAD_TO_DRIVE || 'false').toLowerCase() === 'true';
   let driveLink = null;
@@ -923,11 +964,20 @@ async function runBatch({ from, to, submitter = '', runAll = false }) {
     }
 
     if (runAll) {
-      const all = await fetchDistinctSubmitters(conn, _from, _to);
+//      const all = await fetchDistinctSubmitters(conn, _from, _to);
+
+      const fromCases = await fetchDistinctSubmitters(conn, _from, _to);
+      const eligible = await fetchEligibleRepsFromUsers(conn);
+
+      const all = Array.from(new Set([...eligible, ...fromCases])).sort();
+
       if (!all.length) {
         console.log('(sin submitters en el rango)');
         return;
       }
+  
+      console.log(`Encontrados ${all.length} submitters (incluye elegibles sin casos). Generando...`);
+    
       console.log(`Encontrados ${all.length} submitters. Generando...`);
 
       // Concurrencia configurable por .env
