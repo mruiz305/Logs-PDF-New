@@ -592,11 +592,17 @@ function buildHtml(submitterName, rows, from, to,tableHtmlOverride = null) {
   }
   /* Dropped */
   .t-dropped{
-    background:#FF9A66;
+    background:#ff6961;
   }
   /* GOOD!!! */
   .t-good{
     background:#00CC33;
+  }
+  /* CONFLICT!!! */
+  .t-conflict
+  {
+    background:#4c007d;
+    color:#fff;
   }
 
   .who{
@@ -657,7 +663,7 @@ function buildHtml(submitterName, rows, from, to,tableHtmlOverride = null) {
   }
 
   .row-dropped{
-    background:#FF9A66;
+    background:#ff6961;
     color:#000;
     font-weight:700;
   }
@@ -737,6 +743,10 @@ function buildHtml(submitterName, rows, from, to,tableHtmlOverride = null) {
         Clinic or Atty have indicated the case has dropped. No Credit.
       </div>
       <div class="legend-row">
+        <span class="key-tag t-conflict">CONFLICT</span>
+        This case is in conflict with another case.
+      </div>
+      <div class="legend-row">
         <span class="key-tag t-good">GOOD!!!</span>
         Caso Confirmado / Case Confirmed!
       </div>
@@ -756,6 +766,10 @@ function buildHtml(submitterName, rows, from, to,tableHtmlOverride = null) {
       <div class="legend-row">
         <span class="key-tag t-dropped">Dropped</span>
         La clínica o el abogado han indicado que el caso ha sido cerrado. No hay crédito.
+      </div>
+      <div class="legend-row">
+        <span class="key-tag t-conflict">CONFLICT</span>
+        El caso esta en conflicto con otro caso
       </div>
     </div>
 
