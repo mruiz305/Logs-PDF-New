@@ -261,7 +261,7 @@ function sumMoneyAsString(rows, field) {
 
 /* ============= KPIs por grupo con filtro ============= */
 function computeStats(rows) {
-  const total = rows.length;
+  const total = rows.filter(r => normalize(r.Status) !== 'CONFLICT').length;
   const droppedExact = rows.filter(r => normalize(r.Status) === 'DROPPED').length;
   const droppedAny = rows.filter(r => normalize(r.Status).includes('DROP')).length;
   const pctExactStr = total ? ((droppedExact / total) * 100).toFixed(2) : '0.00';
@@ -419,7 +419,12 @@ function statusClass(row) {
     return 'row-good';
   }
 
-  // 6) Todo lo demás en blanco
+  // 6) CONFLICT: por Status
+  if (up.includes('CONFLICT')) {
+    return 'row-conflict';
+  }
+
+  // 7) Todo lo demás en blanco
   return 'row-active-blank';
 }
 
@@ -660,6 +665,12 @@ function buildHtml(submitterName, rows, from, to,tableHtmlOverride = null) {
   .row-good{
     background:#00CC33;
     color:#000;
+    font-weight:700;
+  }
+
+    .row-conflict{
+    background:#4c007d;
+    color:#fff;
     font-weight:700;
   }
 
