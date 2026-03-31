@@ -312,6 +312,63 @@ function monthLabel(ym) {
   return new Intl.DateTimeFormat('en-US', { month: 'short', year: 'numeric' }).format(d);
 }
 
+/** Meses calendario que intersectan [fromYmd, toYmd], orden ascendente (YYYY-MM-DD). */
+function monthsInclusiveBetween(fromYmd, toYmd) {
+  const parse = s => {
+    const [y, m] = s.split('-').map(Number);
+    return { y, m };
+  };
+  const a = parse(fromYmd);
+  const b = parse(toYmd);
+  const start = a.y * 12 + a.m <= b.y * 12 + b.m ? a : b;
+  const end = a.y * 12 + a.m <= b.y * 12 + b.m ? b : a;
+  const out = [];
+  let y = start.y;
+  let m = start.m;
+  while (y < end.y || (y === end.y && m <= end.m)) {
+    out.push(`${y}-${String(m).padStart(2, '0')}`);
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+  }
+  return out;
+}
+
+function earliestCameInYm(rows) {
+  let min = null;
+  for (const r of rows) {
+    const ym = r.CameInYM || (r.CameInDate ? r.CameInDate.toString().slice(0, 7) : '');
+    if (!ym) continue;
+    if (min === null || ym < min) min = ym;
+  }
+  return min;
+}
+
+/**
+ * Meses de la grilla: desde el primer mes con al menos un caso del rep hasta el fin del rango
+ * (no se muestran meses vacíos anteriores a su primera actividad en el período).
+ */
+function monthsForRepGridDesc(fromYmd, toYmd, rows) {
+  const asc = monthsInclusiveBetween(fromYmd, toYmd);
+  if (!asc.length) return [];
+  const rangeStartYm = asc[0];
+  const rangeEndYm = asc[asc.length - 1];
+  const firstWithData = earliestCameInYm(rows);
+  let startYm = firstWithData != null ? firstWithData : rangeStartYm;
+  if (startYm < rangeStartYm) startYm = rangeStartYm;
+  if (startYm > rangeEndYm) startYm = rangeEndYm;
+  return asc.filter(ym => ym >= startYm).reverse();
+}
+
+function cameInTimeDesc(r) {
+  const d = r.CameInDate;
+  if (!d) return 0;
+  const t = Date.parse(`${d.toString().slice(0, 10)}T12:00:00`);
+  return Number.isNaN(t) ? 0 : t;
+}
+
 function computeMonthlyAggregates(rows) {
   const buckets = new Map(); // key: 'YYYY-MM' -> { rows:[] }
 
@@ -428,39 +485,75 @@ function statusClass(row) {
   return 'row-active-blank';
 }
 
-function buildGroupedTable(rows) {
-  // asume que rows ya vienen ordenadas por dateCameIn DESC (tu query lo hace)
-  let lastYM = null;
-  let monthIndex = 0;
+function buildGroupedTable(rows, fromYmd, toYmd) {
+  const months = monthsForRepGridDesc(fromYmd, toYmd, rows);
+  const buckets = new Map();
+  const noMonth = [];
 
-  const body = rows
-    .map(r => {
-      const ym = r.CameInYM || (r.CameInDate ? r.CameInDate.toString().slice(0, 7) : '');
-      let chunk = '';
+  for (const r of rows) {
+    const ym = r.CameInYM || (r.CameInDate ? r.CameInDate.toString().slice(0, 7) : '');
+    if (!ym) {
+      noMonth.push(r);
+      continue;
+    }
+    if (!buckets.has(ym)) buckets.set(ym, []);
+    buckets.get(ym).push(r);
+  }
 
-      if (ym !== lastYM) {
-        // nuevo mes ⇒ encabezado de sección y reinicio de contador
-        lastYM = ym;
-        monthIndex = 0;
-        const label = monthLabel(ym); // 'Mar 2025', 'Apr 2025', ...
-        chunk += `
+  for (const [, mrows] of buckets) {
+    mrows.sort((a, b) => cameInTimeDesc(b) - cameInTimeDesc(a));
+  }
+  noMonth.sort((a, b) => cameInTimeDesc(b) - cameInTimeDesc(a));
+
+  const chunks = [];
+
+  for (const ym of months) {
+    const label = monthLabel(ym);
+    chunks.push(`
         <tr class="month-row">
           <td class="month-cell" colspan="16">${label.replace(' ', '-')}</td>
-        </tr>`;
-      }
+        </tr>`);
 
-      monthIndex += 1;
-
-      chunk += `
+    const mrows = buckets.get(ym) || [];
+    if (!mrows.length) {
+      chunks.push(`
+      <tr class="row-active-blank">
+        <td colspan="16" class="month-empty-msg">No cases recorded for this month.</td>
+      </tr>`);
+    } else {
+      let monthIndex = 0;
+      for (const r of mrows) {
+        monthIndex += 1;
+        chunks.push(`
       <tr class="${statusClass(r)}">
         <td>${monthIndex}</td><td>${r.Name || ''}</td><td>${r.Insurance || ''}</td><td>${r.AtFault || ''}</td>
         <td>${r.Locations || ''}</td><td>${r.IDOT || ''}</td><td>${r.LDOT || ''}</td><td>${r.Status || ''}</td>
         <td>${r.Signed || ''}</td><td>${r.DOA || ''}</td><td>${r.Attorney || ''}</td><td>${r.Notes || ''}</td>
         <td>${r.Compliance || ''}</td><td>${r.ConvAtty || ''}</td><td>${r.DropReason || ''}</td><td>${r.LockedDown || ''}</td>
-      </tr>`;
-      return chunk;
-    })
-    .join('');
+      </tr>`);
+      }
+    }
+  }
+
+  if (noMonth.length) {
+    chunks.push(`
+        <tr class="month-row">
+          <td class="month-cell" colspan="16">Unknown-date</td>
+        </tr>`);
+    let monthIndex = 0;
+    for (const r of noMonth) {
+      monthIndex += 1;
+      chunks.push(`
+      <tr class="${statusClass(r)}">
+        <td>${monthIndex}</td><td>${r.Name || ''}</td><td>${r.Insurance || ''}</td><td>${r.AtFault || ''}</td>
+        <td>${r.Locations || ''}</td><td>${r.IDOT || ''}</td><td>${r.LDOT || ''}</td><td>${r.Status || ''}</td>
+        <td>${r.Signed || ''}</td><td>${r.DOA || ''}</td><td>${r.Attorney || ''}</td><td>${r.Notes || ''}</td>
+        <td>${r.Compliance || ''}</td><td>${r.ConvAtty || ''}</td><td>${r.DropReason || ''}</td><td>${r.LockedDown || ''}</td>
+      </tr>`);
+    }
+  }
+
+  const body = chunks.join('');
 
   return `
     <table class="grid">
@@ -524,10 +617,8 @@ function buildMonthlySummaryTable(monthAgg) {
 /* ============= HTML (solo en memoria para PDF) ============= */
 function buildHtml(submitterName, rows, from, to,tableHtmlOverride = null) {
   const kpis = computeKpis(rows);
-  const monthAgg = computeMonthlyAggregates(rows);
   const reportDate = new Date().toLocaleDateString('en-US');
-  //const tableHtml = buildGroupedTable(rows);
-  const tableHtml = tableHtmlOverride ?? buildGroupedTable(rows);
+  const tableHtml = tableHtmlOverride ?? buildGroupedTable(rows, from, to);
 
   return `
 <!doctype html>
@@ -714,6 +805,14 @@ function buildHtml(submitterName, rows, from, to,tableHtmlOverride = null) {
 
   .month-row + tr td{
     border-top-width:2px;
+  }
+
+  .month-empty-msg{
+    text-align:center;
+    font-style:italic;
+    color:#444;
+    padding:8px 6px !important;
+    font-size:7.5px;
   }
 
   .row-active-blank { background:#FFFFFF; }
@@ -913,7 +1012,7 @@ async function generateForOne(conn, browser, submitterName, from, to) {
 
     const hasRows = rows && rows.length > 0;
     const tableHtml = hasRows
-  ? buildGroupedTable(rows)
+  ? buildGroupedTable(rows, from, to)
   : `<div style="padding:10px; border:1px solid #000; font-size:10px;">
        No cases found for this rep in the selected date range.
      </div>`;
