@@ -5,12 +5,23 @@ const mysql = require('mysql2/promise');
 const puppeteer = require('puppeteer');
 const { google } = require('googleapis');
 const { sendViaGmail } = require('./gmailSender');
+const { syncEnabled, syncLogsUrlForSubmitter, getProdMysqlConnection } = require('./logsUrlSync');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileP = promisify(execFile);
 
 // Si qpdf está instalado por Chocolatey, queda en el PATH → basta "qpdf"
 const QPDF_PATH = process.env.QPDF_PATH || 'qpdf';
+
+function puppeteerLaunchOptions() {
+  const opts = {
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  };
+  const exe = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH;
+  if (exe) opts.executablePath = exe;
+  return opts;
+}
 
 /* ============= CLI ============= */
 function argValue(name, def = '') {
@@ -30,14 +41,18 @@ function must(value, label) {
 
 /* ============= MySQL ============= */
 async function getMysqlConnection() {
-  return mysql.createConnection({
+  const cfg = {
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     database: process.env.DB_DATABASE,
     charset: 'utf8mb4',
     dateStrings: true,
-  });
+  };
+  if (process.env.DB_PORT) {
+    cfg.port = parseInt(process.env.DB_PORT, 10);
+  }
+  return mysql.createConnection(cfg);
 }
 
 async function fetchEligibleRepsFromUsers(conn) {
@@ -312,6 +327,63 @@ function monthLabel(ym) {
   return new Intl.DateTimeFormat('en-US', { month: 'short', year: 'numeric' }).format(d);
 }
 
+/** Meses calendario que intersectan [fromYmd, toYmd], orden ascendente (YYYY-MM-DD). */
+function monthsInclusiveBetween(fromYmd, toYmd) {
+  const parse = s => {
+    const [y, m] = s.split('-').map(Number);
+    return { y, m };
+  };
+  const a = parse(fromYmd);
+  const b = parse(toYmd);
+  const start = a.y * 12 + a.m <= b.y * 12 + b.m ? a : b;
+  const end = a.y * 12 + a.m <= b.y * 12 + b.m ? b : a;
+  const out = [];
+  let y = start.y;
+  let m = start.m;
+  while (y < end.y || (y === end.y && m <= end.m)) {
+    out.push(`${y}-${String(m).padStart(2, '0')}`);
+    m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+  }
+  return out;
+}
+
+function earliestCameInYm(rows) {
+  let min = null;
+  for (const r of rows) {
+    const ym = r.CameInYM || (r.CameInDate ? r.CameInDate.toString().slice(0, 7) : '');
+    if (!ym) continue;
+    if (min === null || ym < min) min = ym;
+  }
+  return min;
+}
+
+/**
+ * Meses de la grilla: desde el primer mes con al menos un caso del rep hasta el fin del rango
+ * (no se muestran meses vacíos anteriores a su primera actividad en el período).
+ */
+function monthsForRepGridDesc(fromYmd, toYmd, rows) {
+  const asc = monthsInclusiveBetween(fromYmd, toYmd);
+  if (!asc.length) return [];
+  const rangeStartYm = asc[0];
+  const rangeEndYm = asc[asc.length - 1];
+  const firstWithData = earliestCameInYm(rows);
+  let startYm = firstWithData != null ? firstWithData : rangeStartYm;
+  if (startYm < rangeStartYm) startYm = rangeStartYm;
+  if (startYm > rangeEndYm) startYm = rangeEndYm;
+  return asc.filter(ym => ym >= startYm).reverse();
+}
+
+function cameInTimeDesc(r) {
+  const d = r.CameInDate;
+  if (!d) return 0;
+  const t = Date.parse(`${d.toString().slice(0, 10)}T12:00:00`);
+  return Number.isNaN(t) ? 0 : t;
+}
+
 function computeMonthlyAggregates(rows) {
   const buckets = new Map(); // key: 'YYYY-MM' -> { rows:[] }
 
@@ -428,39 +500,75 @@ function statusClass(row) {
   return 'row-active-blank';
 }
 
-function buildGroupedTable(rows) {
-  // asume que rows ya vienen ordenadas por dateCameIn DESC (tu query lo hace)
-  let lastYM = null;
-  let monthIndex = 0;
+function buildGroupedTable(rows, fromYmd, toYmd) {
+  const months = monthsForRepGridDesc(fromYmd, toYmd, rows);
+  const buckets = new Map();
+  const noMonth = [];
 
-  const body = rows
-    .map(r => {
-      const ym = r.CameInYM || (r.CameInDate ? r.CameInDate.toString().slice(0, 7) : '');
-      let chunk = '';
+  for (const r of rows) {
+    const ym = r.CameInYM || (r.CameInDate ? r.CameInDate.toString().slice(0, 7) : '');
+    if (!ym) {
+      noMonth.push(r);
+      continue;
+    }
+    if (!buckets.has(ym)) buckets.set(ym, []);
+    buckets.get(ym).push(r);
+  }
 
-      if (ym !== lastYM) {
-        // nuevo mes ⇒ encabezado de sección y reinicio de contador
-        lastYM = ym;
-        monthIndex = 0;
-        const label = monthLabel(ym); // 'Mar 2025', 'Apr 2025', ...
-        chunk += `
+  for (const [, mrows] of buckets) {
+    mrows.sort((a, b) => cameInTimeDesc(b) - cameInTimeDesc(a));
+  }
+  noMonth.sort((a, b) => cameInTimeDesc(b) - cameInTimeDesc(a));
+
+  const chunks = [];
+
+  for (const ym of months) {
+    const label = monthLabel(ym);
+    chunks.push(`
         <tr class="month-row">
           <td class="month-cell" colspan="16">${label.replace(' ', '-')}</td>
-        </tr>`;
-      }
+        </tr>`);
 
-      monthIndex += 1;
-
-      chunk += `
+    const mrows = buckets.get(ym) || [];
+    if (!mrows.length) {
+      chunks.push(`
+      <tr class="row-active-blank">
+        <td colspan="16" class="month-empty-msg">No cases recorded for this month.</td>
+      </tr>`);
+    } else {
+      let monthIndex = 0;
+      for (const r of mrows) {
+        monthIndex += 1;
+        chunks.push(`
       <tr class="${statusClass(r)}">
         <td>${monthIndex}</td><td>${r.Name || ''}</td><td>${r.Insurance || ''}</td><td>${r.AtFault || ''}</td>
         <td>${r.Locations || ''}</td><td>${r.IDOT || ''}</td><td>${r.LDOT || ''}</td><td>${r.Status || ''}</td>
         <td>${r.Signed || ''}</td><td>${r.DOA || ''}</td><td>${r.Attorney || ''}</td><td>${r.Notes || ''}</td>
         <td>${r.Compliance || ''}</td><td>${r.ConvAtty || ''}</td><td>${r.DropReason || ''}</td><td>${r.LockedDown || ''}</td>
-      </tr>`;
-      return chunk;
-    })
-    .join('');
+      </tr>`);
+      }
+    }
+  }
+
+  if (noMonth.length) {
+    chunks.push(`
+        <tr class="month-row">
+          <td class="month-cell" colspan="16">Unknown-date</td>
+        </tr>`);
+    let monthIndex = 0;
+    for (const r of noMonth) {
+      monthIndex += 1;
+      chunks.push(`
+      <tr class="${statusClass(r)}">
+        <td>${monthIndex}</td><td>${r.Name || ''}</td><td>${r.Insurance || ''}</td><td>${r.AtFault || ''}</td>
+        <td>${r.Locations || ''}</td><td>${r.IDOT || ''}</td><td>${r.LDOT || ''}</td><td>${r.Status || ''}</td>
+        <td>${r.Signed || ''}</td><td>${r.DOA || ''}</td><td>${r.Attorney || ''}</td><td>${r.Notes || ''}</td>
+        <td>${r.Compliance || ''}</td><td>${r.ConvAtty || ''}</td><td>${r.DropReason || ''}</td><td>${r.LockedDown || ''}</td>
+      </tr>`);
+    }
+  }
+
+  const body = chunks.join('');
 
   return `
     <table class="grid">
@@ -521,13 +629,163 @@ function buildMonthlySummaryTable(monthAgg) {
   </table>`;
 }
 
+function htmlEscape(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function prodStatesCnvViewRef() {
+  const v = (process.env.PROD_STATES_CNV_VIEW || 'vw_states_cnv').trim();
+  if (!/^[a-zA-Z0-9_.]+$/.test(v)) {
+    throw new Error('PROD_STATES_CNV_VIEW inválido');
+  }
+  return v;
+}
+
+function quoteSqlIdent(name) {
+  return `\`${String(name).replace(/`/g, '')}\``;
+}
+
+/** Resuelve nombres reales de columnas (ej. State, cnv en vw_states_cnv). */
+async function resolveStatesCnvColumns(conn, view) {
+  const [colRows] = await conn.execute(`SHOW COLUMNS FROM ${view}`);
+  const names = colRows.map(c => c.Field);
+  if (!names.length) {
+    throw new Error(`La vista ${view} no tiene columnas`);
+  }
+
+  const pick = (wanted, fallbackFn) => {
+    if (wanted && names.includes(wanted)) return wanted;
+    if (wanted) {
+      const ci = names.find(n => n.toLowerCase() === wanted.toLowerCase());
+      if (ci) return ci;
+    }
+    return fallbackFn();
+  };
+
+  const stateCol = pick(process.env.PROD_STATES_CNV_COL_STATE || 'state', () => {
+    return (
+      names.find(n => n.toLowerCase() === 'state') ||
+      names.find(n => /state/i.test(n)) ||
+      names[0]
+    );
+  });
+
+  const cbvCol = pick(process.env.PROD_STATES_CNV_COL_CBV || 'cnv', () => {
+    return (
+      names.find(n => /^cnv$/i.test(n)) ||
+      names.find(n => /^cbv$/i.test(n)) ||
+      names.find(n => /cnv|cbv/i.test(n) && n !== stateCol) ||
+      names.find(n => n !== stateCol) ||
+      names[1]
+    );
+  });
+
+  return { stateCol, cbvCol, names };
+}
+
+/** Vista en producción → filas normalizadas { state, cbv } */
+async function fetchStatesCnvRows() {
+  const view = prodStatesCnvViewRef();
+  const conn = await getProdMysqlConnection();
+  try {
+    const { stateCol, cbvCol } = await resolveStatesCnvColumns(conn, view);
+    const [rows] = await conn.execute(
+      `SELECT ${quoteSqlIdent(stateCol)} AS state, ${quoteSqlIdent(cbvCol)} AS cnv
+       FROM ${view}
+       ORDER BY ${quoteSqlIdent(stateCol)}`
+    );
+    return rows;
+  } finally {
+    await conn.end();
+  }
+}
+
+function formatCbvCell(v) {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'number') {
+    return Number.isFinite(v)
+      ? v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      : '';
+  }
+  const s = String(v).trim();
+  const n = parseFloat(s.replace(/[$,]/g, ''));
+  if (!Number.isNaN(n) && /^[\d$.,\s-]+$/.test(s)) {
+    return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  return s;
+}
+
+/** Reparte filas en N columnas (relleno vertical: col1 arriba→abajo, luego col2…). */
+function splitRowsIntoColumns(rows, columnCount = 3) {
+  const n = Math.max(1, columnCount);
+  const perCol = Math.ceil(rows.length / n);
+  const cols = [];
+  for (let c = 0; c < n; c++) {
+    cols.push(rows.slice(c * perCol, (c + 1) * perCol));
+  }
+  return cols;
+}
+
+function buildStatesCnvColumnTable(colRows) {
+  if (!colRows.length) {
+    return '<table class="states-cnv-grid"><tbody></tbody></table>';
+  }
+  const body = colRows
+    .map(
+      (r, i) => `<tr class="${i % 2 === 0 ? 'states-row-even' : 'states-row-odd'}">
+        <td class="states-col-name">${htmlEscape(r.state)}</td>
+        <td class="states-col-cnv">${htmlEscape(formatCbvCell(r.cnv))}</td>
+      </tr>`
+    )
+    .join('');
+  return `
+    <table class="states-cnv-grid">
+      <thead>
+        <tr>
+          <th>State</th>
+          <th>CNV</th>
+        </tr>
+      </thead>
+      <tbody>${body}</tbody>
+    </table>`;
+}
+
+function buildStatesCnvAppendixHtml(statesRows) {
+  if (!statesRows || !statesRows.length) return '';
+
+  const sorted = [...statesRows].sort((a, b) =>
+    String(a.state || '').localeCompare(String(b.state || ''), 'en', { sensitivity: 'base' })
+  );
+  const columnCount = parseInt(process.env.STATES_CNV_PDF_COLUMNS || '3', 10);
+  const cols = splitRowsIntoColumns(sorted, columnCount);
+  const count = sorted.length;
+
+  const columnsHtml = cols
+    .filter(col => col.length > 0)
+    .map(col => `<div class="states-cnv-column">${buildStatesCnvColumnTable(col)}</div>`)
+    .join('');
+
+  return `
+  <div class="states-cnv-wrap">
+    <div class="states-cnv-header">
+      <div>
+        <div class="states-cnv-title">State Conversion Values (CNV)</div>
+      </div>
+      <div class="states-cnv-meta">${count} states</div>
+    </div>
+    <div class="states-cnv-columns">${columnsHtml}</div>
+  </div>`;
+}
+
 /* ============= HTML (solo en memoria para PDF) ============= */
-function buildHtml(submitterName, rows, from, to,tableHtmlOverride = null) {
+function buildHtml(submitterName, rows, from, to, tableHtmlOverride = null, statesCnvHtml = '') {
   const kpis = computeKpis(rows);
-  const monthAgg = computeMonthlyAggregates(rows);
   const reportDate = new Date().toLocaleDateString('en-US');
-  //const tableHtml = buildGroupedTable(rows);
-  const tableHtml = tableHtmlOverride ?? buildGroupedTable(rows);
+  const tableHtml = tableHtmlOverride ?? buildGroupedTable(rows, from, to);
 
   return `
 <!doctype html>
@@ -613,6 +871,79 @@ function buildHtml(submitterName, rows, from, to,tableHtmlOverride = null) {
   .who .name{ font-weight:800; font-size:9.4px; margin-bottom:2px; }
 
   .range-line{ font-size:9px; font-weight:700; margin:6px 0 6px 0; }
+
+  .states-cnv-wrap{
+    page-break-before: always;
+    break-before: page;
+    padding-top: 2mm;
+  }
+  .states-cnv-header{
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    border-bottom: 2px solid #0b2a3c;
+    margin-bottom: 7px;
+    padding-bottom: 4px;
+  }
+  .states-cnv-title{
+    font-size: 10px;
+    font-weight: 800;
+    color: #0b2a3c;
+    letter-spacing: 0.02em;
+  }
+  .states-cnv-meta{
+    font-size: 8px;
+    font-weight: 700;
+    color: #0b2a3c;
+    background: #e8f1fc;
+    border: 1px solid #9bb8d9;
+    padding: 3px 10px;
+    border-radius: 3px;
+  }
+  .states-cnv-columns{
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    column-gap: 12px;
+    align-items: start;
+  }
+  .states-cnv-column{ min-width: 0; }
+  .states-cnv-grid{
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 7.2px;
+    table-layout: fixed;
+  }
+  .states-cnv-grid th,
+  .states-cnv-grid td{
+    border: 1px solid #b8c5d6;
+    padding: 2.5px 5px;
+    line-height: 1.15;
+  }
+  .states-cnv-grid thead th{
+    background: #1a5fb4;
+    color: #fff;
+    font-weight: 700;
+    font-size: 7px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-color: #0b2a3c;
+    padding: 4px 5px;
+  }
+  .states-col-name{
+    text-align: left;
+    font-weight: 600;
+    color: #1a1a1a;
+    width: 58%;
+    word-break: break-word;
+  }
+  .states-col-cnv{
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: #0b2a3c;
+    width: 42%;
+  }
+  .states-row-even td{ background: #fff; }
+  .states-row-odd td{ background: #f4f7fb; }
 
   table.grid { width:100%; border-collapse:collapse; table-layout:fixed; }
   table.grid th, table.grid td {
@@ -716,6 +1047,14 @@ function buildHtml(submitterName, rows, from, to,tableHtmlOverride = null) {
     border-top-width:2px;
   }
 
+  .month-empty-msg{
+    text-align:center;
+    font-style:italic;
+    color:#444;
+    padding:8px 6px !important;
+    font-size:7.5px;
+  }
+
   .row-active-blank { background:#FFFFFF; }
 </style>
 </head>
@@ -782,6 +1121,8 @@ function buildHtml(submitterName, rows, from, to,tableHtmlOverride = null) {
   </div>
 
   ${tableHtml}
+
+  ${statesCnvHtml}
 </body>
 </html>
   `;
@@ -905,20 +1246,28 @@ async function linearizePdf(pdfPath) {
 }
 
 /* ============= Orquestación ============= */
-async function generateForOne(conn, browser, submitterName, from, to) {
+async function generateForOne(conn, browser, submitterName, from, to, options = {}) {
   const rows = await fetchLogsForSubmitter(conn, submitterName, from, to);
   if (!rows.length) {
     console.log(`(sin datos) ${submitterName}  [${from}..${to}]`);
-  } 
+  }
 
-    const hasRows = rows && rows.length > 0;
-    const tableHtml = hasRows
-  ? buildGroupedTable(rows)
-  : `<div style="padding:10px; border:1px solid #000; font-size:10px;">
+  const hasRows = rows && rows.length > 0;
+  const tableHtml = hasRows
+    ? buildGroupedTable(rows, from, to)
+    : `<div style="padding:10px; border:1px solid #000; font-size:10px;">
        No cases found for this rep in the selected date range.
      </div>`;
 
-  const html = buildHtml(submitterName, rows, from, to,tableHtml);
+  let statesCnvHtml = '';
+  try {
+    const statesRows = await fetchStatesCnvRows();
+    statesCnvHtml = buildStatesCnvAppendixHtml(statesRows);
+  } catch (e) {
+    console.warn(`⚠ Tabla states/CNV (${prodStatesCnvViewRef()}):`, e.message || e);
+  }
+
+  const html = buildHtml(submitterName, rows, from, to, tableHtml, statesCnvHtml);
 
   const outDir = process.env.OUTPUT_DIR || path.join(__dirname, 'output');
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
@@ -928,27 +1277,41 @@ async function generateForOne(conn, browser, submitterName, from, to) {
 
   await generatePdf(browser, html, pdfPath);
   console.log(`✔ PDF: ${pdfPath}`);
-  
-    // ✅ Optimiza para Drive/iPhone
-    await linearizePdf(pdfPath);
+
+  await linearizePdf(pdfPath);
   console.log('✔ PDF linearizado (mejor preview en Drive/iPhone)');
-  // Subida opcional a Drive (por defecto NO sube)
-  const shouldUpload = (process.env.UPLOAD_TO_DRIVE || 'false').toLowerCase() === 'true';
+
+  const forceUpload = options.forceUpload === true;
+  const shouldUpload =
+    forceUpload || (process.env.UPLOAD_TO_DRIVE || 'false').toLowerCase() === 'true';
   let driveLink = null;
 
   if (shouldUpload) {
     const up = await uploadToDrive(pdfPath, `${base}.pdf`);
     driveLink = up.webViewLink;
-
-    // reutiliza la MISMA conexión
     await registerMissingUrlIfNeeded(conn, submitterName, to, 'LOGS', driveLink);
-
     console.log(`↑ Drive: ${driveLink}`);
   } else {
     console.log('↪ UPLOAD_TO_DRIVE=false → no se sube a Drive.');
   }
 
-  return { submitterName, pdfPath, driveLink };
+  let urlSyncStatus = 'skipped';
+  if (!options.skipUrlSync && syncEnabled()) {
+    console.log(`↪ Verificando URL (Drive → producción ${process.env.PROD_DB_DATABASE || 'dbProduction'}/Glide)… ${submitterName}`);
+    try {
+      urlSyncStatus = await syncLogsUrlForSubmitter(conn, submitterName, { driveLink });
+      if (urlSyncStatus === 'unchanged') {
+        console.log(`  ✔ URL ya correcta: ${submitterName}`);
+      } else if (urlSyncStatus === 'error') {
+        console.warn(`  ⚠ URL sync no completada para ${submitterName} (el PDF sí se generó).`);
+      }
+    } catch (e) {
+      console.warn(`  ⚠ URL sync falló (el PDF ya se generó): ${e.message || e}`);
+      urlSyncStatus = 'error';
+    }
+  }
+
+  return { submitterName, pdfPath, driveLink, urlSyncStatus };
 }
 
 /**
@@ -977,10 +1340,7 @@ async function runBatch({ from, to, submitter = '', runAll = false }) {
   }
 
   const conn = await getMysqlConnection();
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  });
+  const browser = await puppeteer.launch(puppeteerLaunchOptions());
 
   try {
     if (submitter) {
@@ -1026,7 +1386,7 @@ async function runBatch({ from, to, submitter = '', runAll = false }) {
       }
       await Promise.all(workers);
 
-      console.log('✔ Batch completo.');
+      console.log('✔ Batch completo (cada PDF incluye verificación de URL si SYNC_URLS_AFTER_PDF≠false).');
 
       
       // Reactivar el correo de missing URL:
@@ -1057,7 +1417,7 @@ async function main() {
   await runBatch({ from, to, submitter, runAll });
 }
 
-module.exports = { runBatch };
+module.exports = { runBatch, generateForOne, puppeteerLaunchOptions, todayYMD };
 
 if (require.main === module) {
   main().catch(e => {

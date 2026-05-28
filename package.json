@@ -4,10 +4,16 @@
   "main": "generateLogsPdf.js",
   "license": "MIT",
   "scripts": {
-    "one": "node generateLogsPdf.js --from 2024-08-01 --to 2025-10-12 --submitter \"Oreana Tascione\"",
-    "all": "node generateLogsPdf.js --from 2024-08-01 --to 2025-10-12 --all"
+    "one": "node src/generateLogsPdf.js --from 2024-08-01 --to 2025-10-12 --submitter \"Oreana Tascione\"",
+    "all": "node src/generateLogsPdf.js --from 2024-08-01 --to 2025-10-12 --all",
+    "pdf:yurany": "node src/generateLogsPdf.js --submitter \"Yurany Martinez\"",
+    "sync-urls": "node src/syncLogsUrlsFromDrive.js",
+    "sync-urls:all-marketing": "node src/syncLogsUrlsFromDrive.js --all-marketing",
+    "sync-urls:dry": "node src/syncLogsUrlsFromDrive.js --dry-run",
+    "sync-urls:active-no-url": "node src/syncLogsUrlsFromDrive.js --active-no-url"
   },
   "dependencies": {
+    "@glideapps/tables": "^1.0.21",
     "dotenv": "^16.4.5",
     "googleapis": "^131.0.0",
     "mysql2": "^3.9.7",
