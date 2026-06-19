@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('./loadEnv');
 const fs = require('fs');
 const path = require('path');
 const mysql = require('mysql2/promise');
@@ -6,6 +6,8 @@ const puppeteer = require('puppeteer');
 const { google } = require('googleapis');
 const { sendViaGmail } = require('./gmailSender');
 const { syncEnabled, syncLogsUrlForSubmitter, getProdMysqlConnection } = require('./logsUrlSync');
+const { CNV_COLOR_SCALE, cnvColorMeta } = require('./cnvColors');
+const { buildCoverageMapHtml } = require('./coverageMap');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileP = promisify(execFile);
@@ -687,21 +689,48 @@ async function resolveStatesCnvColumns(conn, view) {
   return { stateCol, cbvCol, names };
 }
 
-/** Vista en producción → filas normalizadas { state, cbv } */
+/** Vista estados/CNV → filas { state, cnv }. Intenta PROD_DB_* y opcionalmente DB_* como fallback. */
 async function fetchStatesCnvRows() {
   const view = prodStatesCnvViewRef();
-  const conn = await getProdMysqlConnection();
-  try {
-    const { stateCol, cbvCol } = await resolveStatesCnvColumns(conn, view);
-    const [rows] = await conn.execute(
-      `SELECT ${quoteSqlIdent(stateCol)} AS state, ${quoteSqlIdent(cbvCol)} AS cnv
-       FROM ${view}
-       ORDER BY ${quoteSqlIdent(stateCol)}`
-    );
-    return rows;
-  } finally {
-    await conn.end();
+  const attempts = [];
+  const useMainOnly = (process.env.STATES_CNV_USE_MAIN_DB || '').toLowerCase() === 'true';
+  const allowMainFallback =
+    (process.env.STATES_CNV_FALLBACK_MAIN_DB || 'true').toLowerCase() !== 'false';
+
+  if (useMainOnly) {
+    attempts.push({ label: 'DB_*', connect: () => getMysqlConnection() });
+  } else {
+    attempts.push({ label: 'PROD_DB_*', connect: () => getProdMysqlConnection() });
+    if (allowMainFallback) {
+      attempts.push({ label: 'DB_*', connect: () => getMysqlConnection() });
+    }
   }
+
+  const errors = [];
+  for (const { label, connect } of attempts) {
+    let conn;
+    try {
+      conn = await connect();
+      const { stateCol, cbvCol } = await resolveStatesCnvColumns(conn, view);
+      const [rows] = await conn.execute(
+        `SELECT ${quoteSqlIdent(stateCol)} AS state, ${quoteSqlIdent(cbvCol)} AS cnv
+         FROM ${view}
+         ORDER BY ${quoteSqlIdent(stateCol)}`
+      );
+      if (rows.length) {
+        console.log(`✔ CNV estados: ${rows.length} filas desde ${label} / ${view}`);
+      } else {
+        console.warn(`⚠ ${view} en ${label} devolvió 0 filas`);
+      }
+      return rows;
+    } catch (e) {
+      errors.push(`${label}: ${e.message || e}`);
+    } finally {
+      if (conn) await conn.end();
+    }
+  }
+
+  throw new Error(errors.join(' | '));
 }
 
 function formatCbvCell(v) {
@@ -719,6 +748,16 @@ function formatCbvCell(v) {
   return s;
 }
 
+function buildCnvLegendHtml() {
+  const items = CNV_COLOR_SCALE.map(
+    e => `<div class="states-cnv-legend-item">
+      <span class="states-cnv-swatch" style="background:${e.color}"></span>
+      <span>${htmlEscape(e.label)}</span>
+    </div>`
+  ).join('');
+  return `<div class="states-cnv-legend">${items}</div>`;
+}
+
 /** Reparte filas en N columnas (relleno vertical: col1 arriba→abajo, luego col2…). */
 function splitRowsIntoColumns(rows, columnCount = 3) {
   const n = Math.max(1, columnCount);
@@ -730,22 +769,26 @@ function splitRowsIntoColumns(rows, columnCount = 3) {
   return cols;
 }
 
-function buildStatesCnvColumnTable(colRows) {
+function buildStatesCnvColumnTable(colRows, startIndex = 1) {
   if (!colRows.length) {
     return '<table class="states-cnv-grid"><tbody></tbody></table>';
   }
   const body = colRows
-    .map(
-      (r, i) => `<tr class="${i % 2 === 0 ? 'states-row-even' : 'states-row-odd'}">
+    .map((r, i) => {
+      const meta = cnvColorMeta(r.cnv);
+      const num = startIndex + i;
+      return `<tr class="${i % 2 === 0 ? 'states-row-even' : 'states-row-odd'}">
+        <td class="states-col-id">${num}</td>
         <td class="states-col-name">${htmlEscape(r.state)}</td>
-        <td class="states-col-cnv">${htmlEscape(formatCbvCell(r.cnv))}</td>
-      </tr>`
-    )
+        <td class="states-col-cnv" style="background:${meta.color};color:${meta.textColor};font-weight:700">${htmlEscape(formatCbvCell(r.cnv))}</td>
+      </tr>`;
+    })
     .join('');
   return `
     <table class="states-cnv-grid">
       <thead>
         <tr>
+          <th>#</th>
           <th>State</th>
           <th>CNV</th>
         </tr>
@@ -755,25 +798,31 @@ function buildStatesCnvColumnTable(colRows) {
 }
 
 function buildStatesCnvAppendixHtml(statesRows) {
-  if (!statesRows || !statesRows.length) return '';
-
-  const sorted = [...statesRows].sort((a, b) =>
+  const sorted = [...(statesRows || [])].sort((a, b) =>
     String(a.state || '').localeCompare(String(b.state || ''), 'en', { sensitivity: 'base' })
   );
   const columnCount = parseInt(process.env.STATES_CNV_PDF_COLUMNS || '3', 10);
   const cols = splitRowsIntoColumns(sorted, columnCount);
   const count = sorted.length;
 
-  const columnsHtml = cols
-    .filter(col => col.length > 0)
-    .map(col => `<div class="states-cnv-column">${buildStatesCnvColumnTable(col)}</div>`)
-    .join('');
+  let rowOffset = 1;
+  const columnsHtml = count
+    ? cols
+        .filter(col => col.length > 0)
+        .map(col => {
+          const html = `<div class="states-cnv-column">${buildStatesCnvColumnTable(col, rowOffset)}</div>`;
+          rowOffset += col.length;
+          return html;
+        })
+        .join('')
+    : '<div class="states-cnv-empty">Sin datos CNV disponibles.</div>';
 
   return `
   <div class="states-cnv-wrap">
     <div class="states-cnv-header">
       <div>
         <div class="states-cnv-title">State Conversion Values (CNV)</div>
+        ${buildCnvLegendHtml()}
       </div>
       <div class="states-cnv-meta">${count} states</div>
     </div>
@@ -872,18 +921,25 @@ function buildHtml(submitterName, rows, from, to, tableHtmlOverride = null, stat
 
   .range-line{ font-size:9px; font-weight:700; margin:6px 0 6px 0; }
 
-  .states-cnv-wrap{
+  .cnv-section{
     page-break-before: always;
     break-before: page;
-    padding-top: 2mm;
+  }
+
+  .states-cnv-wrap{
+    padding-top: 4px;
+    margin-top: 2px;
+    border-top: 2px solid #0b2a3c;
+    page-break-inside: avoid;
+    break-inside: avoid;
   }
   .states-cnv-header{
     display: flex;
     justify-content: space-between;
     align-items: flex-end;
     border-bottom: 2px solid #0b2a3c;
-    margin-bottom: 7px;
-    padding-bottom: 4px;
+    margin-bottom: 4px;
+    padding-bottom: 2px;
   }
   .states-cnv-title{
     font-size: 10px;
@@ -892,7 +948,7 @@ function buildHtml(submitterName, rows, from, to, tableHtmlOverride = null, stat
     letter-spacing: 0.02em;
   }
   .states-cnv-meta{
-    font-size: 8px;
+    font-size: 9px;
     font-weight: 700;
     color: #0b2a3c;
     background: #e8f1fc;
@@ -910,7 +966,7 @@ function buildHtml(submitterName, rows, from, to, tableHtmlOverride = null, stat
   .states-cnv-grid{
     width: 100%;
     border-collapse: collapse;
-    font-size: 7.2px;
+    font-size: 8.5px;
     table-layout: fixed;
   }
   .states-cnv-grid th,
@@ -923,27 +979,174 @@ function buildHtml(submitterName, rows, from, to, tableHtmlOverride = null, stat
     background: #1a5fb4;
     color: #fff;
     font-weight: 700;
-    font-size: 7px;
+    font-size: 8.5px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     border-color: #0b2a3c;
     padding: 4px 5px;
   }
+  .states-col-id{
+    text-align: center;
+    font-weight: 700;
+    color: #555;
+    width: 8%;
+    font-variant-numeric: tabular-nums;
+  }
   .states-col-name{
     text-align: left;
     font-weight: 600;
     color: #1a1a1a;
-    width: 58%;
+    width: 52%;
     word-break: break-word;
   }
   .states-col-cnv{
     text-align: right;
     font-variant-numeric: tabular-nums;
     color: #0b2a3c;
-    width: 42%;
+    width: 40%;
   }
   .states-row-even td{ background: #fff; }
   .states-row-odd td{ background: #f4f7fb; }
+  .states-cnv-legend{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    margin-top: 5px;
+    font-size: 7px;
+    font-weight: 600;
+  }
+  .states-cnv-legend-item{
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .states-cnv-swatch{
+    width: 12px;
+    height: 12px;
+    border: 1px solid #333;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+  .states-cnv-empty{
+    font-size: 8px;
+    color: #666;
+    padding: 8px 0;
+  }
+
+  .cov-map-wrap{
+    background: #0f1419;
+    color: #e8eef4;
+    padding: 6px 8px 6px;
+    margin-top: 0;
+    border-radius: 4px;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .cov-map-error{
+    background: #4a2020;
+    border: 1px solid #e53935;
+    color: #ffd6d6;
+    padding: 6px 8px;
+    margin-bottom: 8px;
+    font-size: 7px;
+    line-height: 1.35;
+    border-radius: 3px;
+  }
+  .cov-map-header{
+    text-align: center;
+    margin-bottom: 4px;
+    border-bottom: 1px solid #2dd4bf;
+    padding-bottom: 4px;
+  }
+  .cov-map-brand{ font-size: 7.5px; letter-spacing: 0.12em; color: #8aa4b8; }
+  .cov-map-title{ font-size: 14px; font-weight: 800; color: #2dd4bf; letter-spacing: 0.08em; }
+  .cov-map-date{ font-size: 8px; color: #b8c9d9; margin-top: 1px; }
+  .cov-map-body{
+    display: grid;
+    grid-template-columns: 1fr 185px;
+    gap: 6px;
+    align-items: stretch;
+  }
+  .cov-map-canvas{ background: #151b22; border: 1px solid #2a3540; border-radius: 4px; padding: 2px; min-height: 0; }
+  .cov-map-svg{ width: 100%; height: auto; max-height: 300px; display: block; }
+  .cov-state-label-internal{
+    font-family: Arial, Helvetica, sans-serif;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    pointer-events: none;
+  }
+  .cov-state-label-callout{ pointer-events: none; }
+  .cov-state-label-pill{
+    fill: rgba(15, 20, 25, 0.82);
+    stroke: rgba(255, 255, 255, 0.12);
+    stroke-width: 0.5;
+  }
+  .cov-state-label-callout-text{
+    font-family: Arial, Helvetica, sans-serif;
+    font-weight: 600;
+    fill: #f1f5f9;
+    letter-spacing: 0.02em;
+    pointer-events: none;
+  }
+  .cov-label-line{
+    stroke: rgba(241, 245, 249, 0.45);
+    stroke-width: 0.8;
+    fill: none;
+    pointer-events: none;
+  }
+  .cov-dc-marker{ pointer-events: none; }
+  .cov-map-sidebar{
+    background: #151b22;
+    border: 1px solid #2a3540;
+    border-radius: 4px;
+    padding: 6px;
+    font-size: 7.5px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-height: 0;
+  }
+  .cov-legend-title{ font-weight: 800; color: #2dd4bf; margin-bottom: 2px; font-size: 8px; }
+  .cov-legend-item{ display: flex; align-items: center; gap: 4px; margin: 2px 0; font-size: 7.5px; }
+  .cov-legend-swatch{ width: 12px; height: 8px; border: 1px solid #333; flex-shrink: 0; }
+  .cov-map-stats{
+    margin-top: 2px;
+    padding-top: 4px;
+    border-top: 1px solid #2a3540;
+    line-height: 1.4;
+    font-size: 7.5px;
+  }
+  .cov-map-not-covered{
+    margin-top: 2px;
+    padding-top: 4px;
+    border-top: 1px solid #2a3540;
+    flex: 1;
+    min-height: 0;
+  }
+  .cov-footer-title{
+    font-size: 8px;
+    font-weight: 800;
+    color: #2dd4bf;
+    margin-bottom: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    line-height: 1.2;
+  }
+  .cov-regions{
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 7px;
+  }
+  .cov-region{
+    background: #0f1419;
+    border: 1px solid #2a3540;
+    border-radius: 2px;
+    padding: 3px 4px;
+  }
+  .cov-region-title{ font-weight: 800; color: #ff9800; margin-bottom: 1px; font-size: 7px; }
+  .cov-region-states{ color: #c5d3de; line-height: 1.25; font-size: 6.8px; }
+  .cov-region-empty{ font-size: 6px; color: #8aa4b8; }
 
   table.grid { width:100%; border-collapse:collapse; table-layout:fixed; }
   table.grid th, table.grid td {
@@ -1137,6 +1340,8 @@ async function generatePdf(browser, html, outputPath) {
 
     await page.setContent(html, { waitUntil: 'load' });
     await page.emulateMediaType('print');
+    // Espera breve para que el SVG del mapa termine de layout antes del PDF multipágina
+    await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
     await page.pdf({
       path: outputPath,
       format: 'letter',
@@ -1260,12 +1465,20 @@ async function generateForOne(conn, browser, submitterName, from, to, options = 
      </div>`;
 
   let statesCnvHtml = '';
+  let statesRows = [];
+  let statesCnvWarning = '';
   try {
-    const statesRows = await fetchStatesCnvRows();
-    statesCnvHtml = buildStatesCnvAppendixHtml(statesRows);
+    statesRows = await fetchStatesCnvRows();
   } catch (e) {
-    console.warn(`⚠ Tabla states/CNV (${prodStatesCnvViewRef()}):`, e.message || e);
+    statesCnvWarning = `No se pudieron cargar datos de ${prodStatesCnvViewRef()}. ${e.message || e}. Mapa con CNV 0 (plomo) por defecto.`;
+    console.warn(`⚠ Mapa / states CNV:`, e.message || e);
   }
+
+  statesCnvHtml = `<div class="cnv-section">${buildCoverageMapHtml(statesRows, new Date(), statesCnvWarning)}`;
+  if ((process.env.STATES_CNV_TABLE_IN_PDF || 'true').toLowerCase() === 'true') {
+    statesCnvHtml += buildStatesCnvAppendixHtml(statesRows);
+  }
+  statesCnvHtml += '</div>';
 
   const html = buildHtml(submitterName, rows, from, to, tableHtml, statesCnvHtml);
 
@@ -1283,7 +1496,8 @@ async function generateForOne(conn, browser, submitterName, from, to, options = 
 
   const forceUpload = options.forceUpload === true;
   const shouldUpload =
-    forceUpload || (process.env.UPLOAD_TO_DRIVE || 'false').toLowerCase() === 'true';
+    !options.skipUpload &&
+    (forceUpload || (process.env.UPLOAD_TO_DRIVE || 'false').toLowerCase() === 'true');
   let driveLink = null;
 
   if (shouldUpload) {
@@ -1321,7 +1535,7 @@ async function generateForOne(conn, browser, submitterName, from, to, options = 
  *  - submitter: nombre/correo (opcional)
  *  - runAll: boolean (para todos los submitters)
  */
-async function runBatch({ from, to, submitter = '', runAll = false }) {
+async function runBatch({ from, to, submitter = '', runAll = false, skipUpload = false, skipUrlSync = false }) {
   let _from = (from || '').trim();
   let _to = (to || '').trim();
 
@@ -1342,9 +1556,11 @@ async function runBatch({ from, to, submitter = '', runAll = false }) {
   const conn = await getMysqlConnection();
   const browser = await puppeteer.launch(puppeteerLaunchOptions());
 
+  const genOpts = { skipUpload, skipUrlSync };
+
   try {
     if (submitter) {
-      await generateForOne(conn, browser, submitter, _from, _to);
+      await generateForOne(conn, browser, submitter, _from, _to, genOpts);
       return;
     }
 
@@ -1373,7 +1589,7 @@ async function runBatch({ from, to, submitter = '', runAll = false }) {
         while (index < all.length) {
           const s = all[index++];
           try {
-            await generateForOne(conn, browser, s, _from, _to);
+            await generateForOne(conn, browser, s, _from, _to, genOpts);
           } catch (e) {
             console.error(`Error con ${s}:`, e.message || e);
           }
@@ -1413,11 +1629,23 @@ async function main() {
   const to = argValue('to', '').trim();
   const submitter = argValue('submitter', '').trim();
   const runAll = hasFlag('all');
+  const skipUpload = hasFlag('no-upload');
+  const skipUrlSync = hasFlag('no-sync') || skipUpload;
 
-  await runBatch({ from, to, submitter, runAll });
+  if (skipUpload) {
+    console.log('↪ Modo prueba: --no-upload (no sube a Drive ni sincroniza URLs).');
+  }
+
+  await runBatch({ from, to, submitter, runAll, skipUpload, skipUrlSync });
 }
 
-module.exports = { runBatch, generateForOne, puppeteerLaunchOptions, todayYMD };
+module.exports = {
+  runBatch,
+  generateForOne,
+  puppeteerLaunchOptions,
+  todayYMD,
+  buildCoverageMapHtml,
+};
 
 if (require.main === module) {
   main().catch(e => {
