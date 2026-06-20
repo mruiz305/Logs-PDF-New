@@ -1,4 +1,4 @@
-const usaMap = require('@svg-maps/usa').default || require('@svg-maps/usa');
+const usaMap = require('./usaMap');
 const { CNV_COLOR_SCALE, cnvColorMeta } = require('./cnvColors');
 const { buildCnvLookup, COVERAGE_REGIONS } = require('./stateNames');
 const { buildStateNameLabelsSvg, MAP_VIEWBOX_EXPANDED } = require('./mapStateLabels');

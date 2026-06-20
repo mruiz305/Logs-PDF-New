@@ -1,4 +1,4 @@
-const usaMap = require('@svg-maps/usa').default || require('@svg-maps/usa');
+const usaMap = require('./usaMap');
 const { buildLabelPointsFromLocations } = require('./mapCentroids');
 const { cnvColorMeta } = require('./cnvColors');
 
