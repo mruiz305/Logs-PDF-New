@@ -1,9 +1,9 @@
-/** Escala CNV → color. 1 turquesa, 0.5 naranja, 0.33 rojo, 0 plomo. */
+/** Escala CNV → color. 1 Turquoise, 0.5 Blue Green, 0.33 Orange, 0 Gray. */
 const CNV_COLOR_SCALE = [
-  { value: 1, color: '#2dd4bf', textColor: '#0b2a3c', label: '1 — Turquesa (activo)' },
-  { value: 0.5, color: '#ff9800', textColor: '#1a1a1a', label: '0.5 — Naranja' },
-  { value: 0.33, color: '#e53935', textColor: '#ffffff', label: '0.33 — Rojo' },
-  { value: 0, color: '#9e9e9e', textColor: '#1a1a1a', label: '0 — Plomo (sin cobertura)' },
+  { value: 1, color: '#00CEC8', textColor: '#1a1a1a', label: '1 — Turquoise (active)' },
+  { value: 0.5, color: '#0f7d80', textColor: '#eef4f7', label: '0.5 — Blue Green' },
+  { value: 0.33, color: '#f8d39c', textColor: '#1a1a1a', label: '0.33 — Orange' },
+  { value: 0, color: '#9e9e9e', textColor: '#1a1a1a', label: '0 — Gray (no coverage)' },
 ];
 
 function parseCnvNumeric(v) {

@@ -4,8 +4,8 @@
   "main": "generateLogsPdf.js",
   "license": "MIT",
   "scripts": {
-    "one": "node src/generateLogsPdf.js --from 2024-08-01 --to 2025-10-12 --submitter \"Oreana Tascione\"",
-    "all": "node src/generateLogsPdf.js --from 2024-08-01 --to 2025-10-12 --all",
+    "one": "node src/generateLogsPdf.js --from 2024-08-01 --to 2026-06-20 --submitter \"Oreana Tascione\"",
+    "all": "node src/generateLogsPdf.js --from 2024-08-01 --to 2026-06-20 --all",
     "pdf:yurany": "node src/generateLogsPdf.js --submitter \"Yurany Martinez\"",
     "sync-urls": "node src/syncLogsUrlsFromDrive.js",
     "sync-urls:all-marketing": "node src/syncLogsUrlsFromDrive.js --all-marketing",

@@ -112,10 +112,10 @@ function buildCoverageMapHtml(statesRows, asOfDate = new Date(), dataWarning = '
         <div class="cov-legend-title">CNV Legend</div>
         <div class="cov-legend">${buildCoverageLegendHtml()}</div>
         <div class="cov-map-stats">
-          <div><strong>${activeCount}</strong> turquesa (CNV 1)</div>
-          <div><strong>${counts['0.5'] || 0}</strong> naranja (0.5)</div>
-          <div><strong>${counts['0.33'] || 0}</strong> rojo (0.33)</div>
-          <div><strong>${plomoCount}</strong> plomo (0)</div>
+          <div><strong>${activeCount}</strong> Turquoise (CNV 1)</div>
+          <div><strong>${counts['0.5'] || 0}</strong> Blue Green (0.5)</div>
+          <div><strong>${counts['0.33'] || 0}</strong> Orange (0.33)</div>
+          <div><strong>${plomoCount}</strong> Gray (0)</div>
         </div>
         <div class="cov-map-not-covered">
           <div class="cov-footer-title">States with CNV 0 (not covered)</div>
