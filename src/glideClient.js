@@ -44,4 +44,4 @@ function isGlideConfigured() {
   );
 }
 
-module.exports = { updateLogsUrlInGlide, isGlideConfigured };
+module.exports = { getGlideTable, updateLogsUrlInGlide, isGlideConfigured };

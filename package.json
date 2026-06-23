@@ -10,7 +10,9 @@
     "sync-urls": "node src/syncLogsUrlsFromDrive.js",
     "sync-urls:all-marketing": "node src/syncLogsUrlsFromDrive.js --all-marketing",
     "sync-urls:dry": "node src/syncLogsUrlsFromDrive.js --dry-run",
-    "sync-urls:active-no-url": "node src/syncLogsUrlsFromDrive.js --active-no-url"
+    "sync-urls:active-no-url": "node src/syncLogsUrlsFromDrive.js --active-no-url",
+    "sync-glide": "node src/syncGlideUrlsFromGUsers.js",
+    "sync-glide:dry": "node src/syncGlideUrlsFromGUsers.js --dry-run"
   },
   "dependencies": {
     "@glideapps/tables": "^1.0.21",
