@@ -5,7 +5,11 @@
 require('dotenv').config();
 const mysql = require('mysql2/promise');
 const { findFileLinkByName } = require('./drive');
-const { updateLogsUrlInGlide, isGlideConfigured } = require('./glideClient');
+const {
+  syncLogsUrlToGlide,
+  isGlideConfigured,
+  formatGlideSyncResult,
+} = require('./glideClient');
 
 function gUsersTableName() {
   const t = (process.env.G_USERS_TABLE || 'g_users').trim();
@@ -196,7 +200,7 @@ async function syncLogsUrlForSubmitter(stgConn, submitterName, options = {}) {
       correctUrl
     );
 
-    let glideOk = false;
+    let glideResult = null;
     let glideSkipped = false;
     if ((process.env.SYNC_GLIDE || 'true').toLowerCase() === 'false') {
       glideSkipped = true;
@@ -205,7 +209,12 @@ async function syncLogsUrlForSubmitter(stgConn, submitterName, options = {}) {
       glideSkipped = true;
     } else {
       try {
-        glideOk = await updateLogsUrlInGlide(user.email, correctUrl);
+        glideResult = await syncLogsUrlToGlide(user.email, correctUrl, {
+          main: true,
+          profile: true,
+          onlyIfEmpty: false,
+          onlyIfDifferent: true,
+        });
       } catch (e) {
         console.warn(`  ⚠ Glide (${user.email}):`, e.message || e);
       }
@@ -214,8 +223,8 @@ async function syncLogsUrlForSubmitter(stgConn, submitterName, options = {}) {
     if (mysqlOk) {
       const parts = [`${prodDb}.${gUsersTableName()}`];
       if (stgOk) parts.push(`${process.env.DB_DATABASE || 'staging'}.${stgUsersTableName()}`);
-      if (glideOk) parts.push('Glide');
-      else if (!glideSkipped) parts.push('Glide (email no encontrado)');
+      if (glideResult) parts.push(formatGlideSyncResult(glideResult));
+      else if (!glideSkipped) parts.push('Glide (error)');
       console.log(`  ✔ URL sync ${user.email}: ${parts.join(' + ')}`);
     } else {
       console.warn(`  ⚠ URL sync: no se pudo actualizar producción para ${user.email}`);

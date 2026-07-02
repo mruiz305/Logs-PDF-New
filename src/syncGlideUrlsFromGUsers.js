@@ -1,6 +1,6 @@
 /**
- * CLI: sincroniza logsIndividualFile desde g_users (producción) hacia Glide.
- * Útil cuando MySQL ya tiene URLs actualizadas pero Glide quedó atrasado.
+ * CLI: sincroniza logsIndividualFile desde g_users (producción) hacia Glide
+ * (tabla MAIN + tabla PROFILE).
  */
 require('./loadEnv');
 const {
@@ -8,8 +8,11 @@ const {
   gUsersTableName,
 } = require('./logsUrlSync');
 const {
-  getGlideTable,
   isGlideConfigured,
+  loadGlideCache,
+  clearGlideCache,
+  syncLogsUrlToGlide,
+  isGlideProfileConfigured,
 } = require('./glideClient');
 
 function hasFlag(name) {
@@ -50,6 +53,7 @@ async function run() {
   const dryRun = hasFlag('dry-run');
   const all = hasFlag('all');
   const overwrite = hasFlag('overwrite');
+  const profileOnly = hasFlag('profile-only');
   const email = argValue('email', '');
 
   if (!isGlideConfigured()) {
@@ -57,26 +61,28 @@ async function run() {
   }
 
   const conn = await getProdMysqlConnection();
-  const glideTable = getGlideTable();
-  let updated = 0;
+  clearGlideCache();
+  const cache = await loadGlideCache(true);
+
+  let updatedMain = 0;
+  let updatedProfile = 0;
   let skippedHasUrl = 0;
   let missingInGlide = 0;
   let errors = 0;
 
   try {
     const users = await fetchUsersWithLogsUrl(conn, { all, email });
-    const glideRows = await glideTable.get();
-    const glideByEmail = new Map(
-      glideRows
-        .filter(r => String(r.email || '').trim())
-        .map(r => [String(r.email || '').trim().toLowerCase(), r])
-    );
 
     console.log(`Usuarios con logsIndividualFile en g_users: ${users.length}`);
     console.log(
+      profileOnly
+        ? 'Destino: solo Glide PROFILE'
+        : 'Destino: Glide MAIN + PROFILE'
+    );
+    console.log(
       overwrite
-        ? 'Modo overwrite: actualiza Glide aunque ya tenga URL.'
-        : 'Modo default: solo actualiza Glide si logsIndividualFile está vacío.'
+        ? 'Modo overwrite: actualiza aunque ya tenga URL.'
+        : 'Modo default: solo actualiza celdas vacías en Glide.'
     );
     if (dryRun) console.log('Modo dry-run: no se actualiza Glide.\n');
 
@@ -84,30 +90,77 @@ async function run() {
       const userEmail = String(user.email || '').trim();
       const url = String(user.logsIndividualFile || '').trim();
       try {
-        const glideRow = glideByEmail.get(userEmail.toLowerCase());
-        if (!glideRow) {
+        const mainRow = cache.mainByEmail.get(userEmail.toLowerCase());
+        const profileRow = isGlideProfileConfigured()
+          ? cache.profileByEmail.get(userEmail.toLowerCase())
+          : null;
+
+        if (!profileOnly && !mainRow) {
           missingInGlide++;
-          console.warn(`⚠ Email no encontrado en Glide: ${userEmail}`);
+          console.warn(`⚠ Email no encontrado en Glide main: ${userEmail}`);
+          continue;
+        }
+        if (profileOnly && !profileRow) {
+          missingInGlide++;
+          console.warn(`⚠ Email no encontrado en Glide profile: ${userEmail}`);
           continue;
         }
 
-        const currentGlideUrl = String(glideRow.logsIndividualFile || '').trim();
-        if (currentGlideUrl && !overwrite) {
+        const currentMainUrl = mainRow
+          ? String(mainRow.logsIndividualFile || '').trim()
+          : '';
+        const currentProfileUrl = profileRow
+          ? String(profileRow.logsIndividualFile || '').trim()
+          : '';
+
+        const mainNeedsUpdate =
+          !profileOnly &&
+          mainRow &&
+          (overwrite ? currentMainUrl !== url : !currentMainUrl);
+        const profileNeedsUpdate =
+          profileRow &&
+          (overwrite ? currentProfileUrl !== url : !currentProfileUrl);
+
+        if (!mainNeedsUpdate && !profileNeedsUpdate) {
           skippedHasUrl++;
           continue;
         }
 
         if (dryRun) {
-          console.log(
-            `[DRY-RUN] ${userEmail}: ${currentGlideUrl || '(vacío)'} → ${url}`
-          );
-          updated++;
+          if (mainNeedsUpdate) {
+            console.log(
+              `[DRY-RUN main] ${userEmail}: ${currentMainUrl || '(vacío)'} → ${url}`
+            );
+            updatedMain++;
+          }
+          if (profileNeedsUpdate) {
+            console.log(
+              `[DRY-RUN profile] ${userEmail}: ${currentProfileUrl || '(vacío)'} → ${url}`
+            );
+            updatedProfile++;
+          }
           continue;
         }
 
-        await glideTable.update(glideRow.$rowID, { logsIndividualFile: url });
-        updated++;
-        console.log(`✔ Glide actualizado: ${userEmail}`);
+        const result = await syncLogsUrlToGlide(userEmail, url, {
+          main: !profileOnly,
+          profile: isGlideProfileConfigured(),
+          onlyIfEmpty: !overwrite,
+          onlyIfDifferent: true,
+          cache,
+        });
+
+        if (result.mainUpdated) {
+          updatedMain++;
+          console.log(`✔ Glide main actualizado: ${userEmail}`);
+        }
+        if (result.profileUpdated) {
+          updatedProfile++;
+          console.log(`✔ Glide profile actualizado: ${userEmail}`);
+        }
+        if (!result.mainUpdated && !result.profileUpdated) {
+          skippedHasUrl++;
+        }
       } catch (e) {
         errors++;
         console.error(`✗ ${userEmail}:`, e.message || e);
@@ -118,8 +171,9 @@ async function run() {
   }
 
   console.log('\n--- Resumen g_users → Glide ---');
-  console.log(`Actualizados / candidatos dry-run: ${updated}`);
-  console.log(`Omitidos porque Glide ya tenía URL: ${skippedHasUrl}`);
+  console.log(`Main actualizados / dry-run: ${updatedMain}`);
+  console.log(`Profile actualizados / dry-run: ${updatedProfile}`);
+  console.log(`Omitidos (ya tenían URL o sin cambio): ${skippedHasUrl}`);
   console.log(`No encontrados en Glide: ${missingInGlide}`);
   console.log(`Errores: ${errors}`);
 }
