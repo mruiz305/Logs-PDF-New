@@ -197,7 +197,8 @@ async function fetchLogsForSubmitter(conn, submitterName, from, to) {
         v.intakeSpecialist   AS LockedDown,
         DATE(v.dateCameIn)                 AS CameInDate,
         DATE_FORMAT(v.dateCameIn, '%Y-%m') AS CameInYM,
-        Confirmed
+        Confirmed,
+        v.accidentState
       FROM ${view} v
       INNER JOIN stg_g_users gu
         ON TRIM(submitter) = TRIM(gu.email)
@@ -546,7 +547,7 @@ function buildGroupedTable(rows, fromYmd, toYmd) {
         <td>${monthIndex}</td><td>${r.Name || ''}</td><td>${r.Insurance || ''}</td><td>${r.AtFault || ''}</td>
         <td>${r.Locations || ''}</td><td>${r.IDOT || ''}</td><td>${r.LDOT || ''}</td><td>${r.Status || ''}</td>
         <td>${r.Signed || ''}</td><td>${r.DOA || ''}</td><td>${r.Attorney || ''}</td><td>${r.Notes || ''}</td>
-        <td>${r.Compliance || ''}</td><td>${r.ConvAtty || ''}</td><td>${r.DropReason || ''}</td><td>${r.LockedDown || ''}</td>
+        <td>${r.accidentState || ''}</td><td>${r.ConvAtty || ''}</td><td>${r.DropReason || ''}</td><td>${r.LockedDown || ''}</td>
       </tr>`);
       }
     }
@@ -565,7 +566,7 @@ function buildGroupedTable(rows, fromYmd, toYmd) {
         <td>${monthIndex}</td><td>${r.Name || ''}</td><td>${r.Insurance || ''}</td><td>${r.AtFault || ''}</td>
         <td>${r.Locations || ''}</td><td>${r.IDOT || ''}</td><td>${r.LDOT || ''}</td><td>${r.Status || ''}</td>
         <td>${r.Signed || ''}</td><td>${r.DOA || ''}</td><td>${r.Attorney || ''}</td><td>${r.Notes || ''}</td>
-        <td>${r.Compliance || ''}</td><td>${r.ConvAtty || ''}</td><td>${r.DropReason || ''}</td><td>${r.LockedDown || ''}</td>
+        <td>${r.accidentState || ''}</td><td>${r.ConvAtty || ''}</td><td>${r.DropReason || ''}</td><td>${r.LockedDown || ''}</td>
       </tr>`);
     }
   }
@@ -578,7 +579,7 @@ function buildGroupedTable(rows, fromYmd, toYmd) {
         <tr>
           <th>#</th><th>NAME</th><th>INSURANCE</th><th>AT FAULT</th><th>LOCATIONS</th>
           <th>IDOT</th><th>LDOT</th><th>STATUS</th><th>SIGNED</th><th>DOA</th>
-          <th>ATTORNEY</th><th>NOTES</th><th>COMPLIANCE</th><th>CONV</th>
+          <th>ATTORNEY</th><th>NOTES</th><th>ACC STATE</th><th>CONV</th>
           <th>ATTY DROP REASON</th><th>LOCKED DOWN</th>
         </tr>
       </thead>
@@ -586,6 +587,7 @@ function buildGroupedTable(rows, fromYmd, toYmd) {
     </table>
   `;
 }
+
 
 function buildMonthlySummaryTable(monthAgg) {
   if (!monthAgg.length) return '';
