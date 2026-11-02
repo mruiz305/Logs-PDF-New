@@ -184,6 +184,7 @@ async function fetchLogsForSubmitter(conn, submitterName, from, to) {
         v.pipInsurance       AS Insurance,
         v.atfaultInsurance   AS AtFault,
         v.txLocation         AS Locations,
+        v.txLocation_state         AS Locations_state,
         DATE_FORMAT(v.idot, '%m/%d/%Y') AS IDOT,
         DATE_FORMAT(v.ldot, '%m/%d/%Y') AS LDOT,
         v.Status,
@@ -545,7 +546,7 @@ function buildGroupedTable(rows, fromYmd, toYmd) {
         chunks.push(`
       <tr class="${statusClass(r)}">
         <td>${monthIndex}</td><td>${r.Name || ''}</td><td>${r.Insurance || ''}</td><td>${r.AtFault || ''}</td>
-        <td>${r.Locations || ''}</td><td>${r.IDOT || ''}</td><td>${r.LDOT || ''}</td><td>${r.Status || ''}</td>
+        <td>${r.Locations_state || ''}</td><td>${r.IDOT || ''}</td><td>${r.LDOT || ''}</td><td>${r.Status || ''}</td>
         <td>${r.Signed || ''}</td><td>${r.DOA || ''}</td><td>${r.Attorney || ''}</td><td>${r.Notes || ''}</td>
         <td>${r.accidentState || ''}</td><td>${r.ConvAtty || ''}</td><td>${r.DropReason || ''}</td><td>${r.LockedDown || ''}</td>
       </tr>`);
@@ -564,7 +565,7 @@ function buildGroupedTable(rows, fromYmd, toYmd) {
       chunks.push(`
       <tr class="${statusClass(r)}">
         <td>${monthIndex}</td><td>${r.Name || ''}</td><td>${r.Insurance || ''}</td><td>${r.AtFault || ''}</td>
-        <td>${r.Locations || ''}</td><td>${r.IDOT || ''}</td><td>${r.LDOT || ''}</td><td>${r.Status || ''}</td>
+        <td>${r.Locations_state || ''}</td><td>${r.IDOT || ''}</td><td>${r.LDOT || ''}</td><td>${r.Status || ''}</td>
         <td>${r.Signed || ''}</td><td>${r.DOA || ''}</td><td>${r.Attorney || ''}</td><td>${r.Notes || ''}</td>
         <td>${r.accidentState || ''}</td><td>${r.ConvAtty || ''}</td><td>${r.DropReason || ''}</td><td>${r.LockedDown || ''}</td>
       </tr>`);
