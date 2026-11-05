@@ -199,7 +199,8 @@ async function fetchLogsForSubmitter(conn, submitterName, from, to) {
         DATE(v.dateCameIn)                 AS CameInDate,
         DATE_FORMAT(v.dateCameIn, '%Y-%m') AS CameInYM,
         Confirmed,
-        v.accidentState
+        v.accidentState,
+        v.accidentState_Abbreviation
       FROM ${view} v
       INNER JOIN stg_g_users gu
         ON TRIM(submitter) = TRIM(gu.email)
@@ -548,7 +549,7 @@ function buildGroupedTable(rows, fromYmd, toYmd) {
         <td>${monthIndex}</td><td>${r.Name || ''}</td><td>${r.Insurance || ''}</td><td>${r.AtFault || ''}</td>
         <td>${r.Locations_state || ''}</td><td>${r.IDOT || ''}</td><td>${r.LDOT || ''}</td><td>${r.Status || ''}</td>
         <td>${r.Signed || ''}</td><td>${r.DOA || ''}</td><td>${r.Attorney || ''}</td><td>${r.Notes || ''}</td>
-        <td>${r.accidentState || ''}</td><td>${r.ConvAtty || ''}</td><td>${r.DropReason || ''}</td><td>${r.LockedDown || ''}</td>
+        <td>${r.accidentState_Abbreviation || ''}</td><td>${r.ConvAtty || ''}</td><td>${r.DropReason || ''}</td><td>${r.LockedDown || ''}</td>
       </tr>`);
       }
     }
@@ -567,7 +568,7 @@ function buildGroupedTable(rows, fromYmd, toYmd) {
         <td>${monthIndex}</td><td>${r.Name || ''}</td><td>${r.Insurance || ''}</td><td>${r.AtFault || ''}</td>
         <td>${r.Locations_state || ''}</td><td>${r.IDOT || ''}</td><td>${r.LDOT || ''}</td><td>${r.Status || ''}</td>
         <td>${r.Signed || ''}</td><td>${r.DOA || ''}</td><td>${r.Attorney || ''}</td><td>${r.Notes || ''}</td>
-        <td>${r.accidentState || ''}</td><td>${r.ConvAtty || ''}</td><td>${r.DropReason || ''}</td><td>${r.LockedDown || ''}</td>
+        <td>${r.accidentState_Abbreviation || ''}</td><td>${r.ConvAtty || ''}</td><td>${r.DropReason || ''}</td><td>${r.LockedDown || ''}</td>
       </tr>`);
     }
   }
